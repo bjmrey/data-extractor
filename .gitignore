@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# App data (settings incl. API keys, templates, extractions, uploaded PDFs)
+/data/
