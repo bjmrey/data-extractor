@@ -7,9 +7,10 @@ import { folderSupported } from '../lib/storage.js';
 import { exportWorkspace, importWorkspace } from '../lib/workspace-zip.js';
 import { downloadBlob } from '../lib/spreadsheet.js';
 
+const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 function blankProvider(type = 'anthropic') {
-  return { id: newId(), name: PROVIDER_TYPES[type].label, type, apiKey: '', model: PROVIDER_TYPES[type].defaultModel, baseUrl: '' };
+  return { id: newId(), name: PROVIDER_TYPES[type].label, type, apiKey: '', model: PROVIDER_TYPES[type].defaultModel, baseUrl: '', effort: type === 'anthropic' ? 'high' : '' };
 }
 
 export default function SettingsPage() {
@@ -184,7 +185,7 @@ export default function SettingsPage() {
 
 function ProviderForm({ value: p, onChange, onSave, onCancel }) {
   const set = (k, v) => onChange({ ...p, [k]: v });
-  const changeType = (type) => onChange({ ...p, type, name: PROVIDER_TYPES[type].label, model: PROVIDER_TYPES[type].defaultModel, baseUrl: '' });
+  const changeType = (type) => onChange({ ...p, type, name: PROVIDER_TYPES[type].label, model: PROVIDER_TYPES[type].defaultModel, baseUrl: '', effort: type === 'anthropic' ? 'high' : '' });
   const t = PROVIDER_TYPES[p.type];
   return (
     <div className="subform">
@@ -210,6 +211,17 @@ function ProviderForm({ value: p, onChange, onSave, onCancel }) {
         <Field label="Base URL" hint={t.baseUrl ? `Default: ${t.baseUrl}` : 'Leave empty for the default endpoint'}>
           <input value={p.baseUrl} onChange={(e) => set('baseUrl', e.target.value)} placeholder={t.baseUrl} />
         </Field>
+        {p.type === 'anthropic' && (
+          <Field label="Effort" hint="Higher = more thorough, slower. Leave empty for models that do not support effort.">
+            <select value={p.effort || ''} onChange={(e) => set('effort', e.target.value)}>
+              {EFFORTS.map((x) => (
+                <option key={x} value={x}>
+                  {x || '(not sent)'}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
       </div>
       <div className="actions">
         <button className="btn primary" onClick={onSave} disabled={!p.name || !p.model}>

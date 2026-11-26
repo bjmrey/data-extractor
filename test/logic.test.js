@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { coerceValue, slugify, buildJsonPayload, fieldsFromSampleJson, validateTemplate } from '../src/lib/fields.js';
 import { parseCsv, toCsv, csvRowsToGrid, detectCandidates, suggestSettings, colLetter, colIndex } from '../src/lib/sheet-detect.js';
 import { buildSchema, buildUserPrompt } from '../src/lib/prompt.js';
-import { parseJsonResponse, validateSchema } from '../src/lib/llm.js';
+import { parseJsonResponse } from '../src/lib/llm.js';
 
 test('coerceValue handles financial number formats', () => {
   assert.equal(coerceValue('1,234.5', 'currency'), 1234.5);
@@ -92,15 +92,4 @@ test('parseJsonResponse tolerates fences and prose', () => {
   assert.deepEqual(parseJsonResponse('```json\n{"a":1}\n```'), { a: 1 });
   assert.deepEqual(parseJsonResponse('Here you go: {"a":2} hope it helps'), { a: 2 });
   assert.throws(() => parseJsonResponse('nope'));
-});
-
-test('validateSchema checks Claude tool output against the extraction schema', () => {
-  const schema = buildSchema([{ key: 'revenue', label: 'Revenue', type: 'number' }]);
-  const meta = { company_name: 'Acme', fiscal_year: '2024', period_end: null, currency: 'EUR', unit: 'thousands' };
-  const ok = { meta, values: [{ key: 'revenue', value: '1200', page: 4, source: 'Revenue 1,200', confidence: 'high' }], notes: null };
-  assert.deepEqual(validateSchema(ok, schema), []);
-  const bad = { meta: { ...meta, extra: 1 }, values: [{ key: 'ebitda', value: 5, page: 1.5, source: null, confidence: 'sure' }] };
-  const errs = validateSchema(bad, schema);
-  for (const frag of ['$.notes: missing', '$.meta.extra: unexpected', '$.values[0].key', '$.values[0].value', '$.values[0].page', '$.values[0].confidence'])
-    assert.ok(errs.some((e) => e.startsWith(frag)), `expected error for ${frag}: ${errs.join(' | ')}`);
 });

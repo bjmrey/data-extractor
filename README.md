@@ -21,7 +21,7 @@ A React app that extracts company financials from a PDF (annual report, financia
 
 | Provider | SDK | PDF handling |
 |---|---|---|
-| Anthropic (Claude), default model `claude-sonnet-4-20250514` | `@anthropic-ai/sdk` | Native PDF |
+| Anthropic (Claude), default model `claude-opus-5-5` | `@anthropic-ai/sdk` | Native PDF |
 | OpenAI | `openai` | Native PDF |
 | Google Gemini (OpenAI-compatible endpoint) | `openai` | Extracted text |
 | Mistral | `openai` | Extracted text |
@@ -29,7 +29,7 @@ A React app that extracts company financials from a PDF (annual report, financia
 
 Model names can be edited in **Settings**. Requests go **directly from the browser** to the provider:
 
-- **Claude** uses the SDK's `dangerouslyAllowBrowser` mode and streaming. The Messages API has no JSON-schema output mode, so the schema is sent as the input schema of a single tool that the model is forced to call (`tool_choice`). The tool input is checked against the schema, and the request is retried once with the errors if it doesn't match.
+- **Claude** uses the SDK's `dangerouslyAllowBrowser` mode, streaming, structured outputs, a configurable effort level, and server-side refusal fallbacks on the models that support them.
 - **The other providers** use the OpenAI SDK. The request first asks for strict JSON schema output; if the endpoint rejects it, it retries with JSON mode, then with plain text.
 
 ## Storage: flat files
@@ -58,10 +58,7 @@ files/<id>.pdf|.xlsx|.csv  uploaded PDFs and template spreadsheets
 
 ## Run
 
-Requires Node 22.12+.
-
 ```bash
-nvm use
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # static build in dist/ — host it anywhere (it uses hash routing)

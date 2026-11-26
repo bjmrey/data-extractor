@@ -5,18 +5,21 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 
 export const PROVIDER_TYPES = {
-  anthropic: { label: 'Anthropic (Claude)', defaultModel: 'claude-sonnet-4-20250514', nativePdf: true, baseUrl: '' },
-  openai: { label: 'OpenAI', defaultModel: 'gpt-4.1', nativePdf: true, baseUrl: 'https://api.openai.com/v1' },
-  gemini: { label: 'Google Gemini', defaultModel: 'gemini-2.5-pro-preview-05-06', nativePdf: false, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
+  anthropic: { label: 'Anthropic (Claude)', defaultModel: 'claude-opus-5-5', nativePdf: true, baseUrl: '' },
+  openai: { label: 'OpenAI', defaultModel: 'gpt-5.1', nativePdf: true, baseUrl: 'https://api.openai.com/v1' },
+  gemini: { label: 'Google Gemini', defaultModel: 'gemini-2.5-pro', nativePdf: false, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
   mistral: { label: 'Mistral', defaultModel: 'mistral-large-latest', nativePdf: false, baseUrl: 'https://api.mistral.ai/v1' },
   'openai-compatible': { label: 'OpenAI-compatible (Azure, Groq, Ollama, LM Studio…)', defaultModel: '', nativePdf: false, baseUrl: 'http://localhost:11434/v1' },
 };
+
+// Claude models that accept server-side refusal fallbacks (fallbacks: "default").
+const CLAUDE_FALLBACK_MODELS = ['claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5'];
 
 export const supportsNativePdf = (provider) => !!PROVIDER_TYPES[provider?.type]?.nativePdf;
 
 /**
  * Run one structured-extraction request.
- * @param provider  { type, apiKey, model, baseUrl }
+ * @param provider  { type, apiKey, model, baseUrl, effort }
  * @param req       { system, text, pdf?: { base64, fileName }, schema, signal }
  * @returns { text, model, usage }
  */
@@ -27,18 +30,6 @@ export async function runLLM(provider, req) {
   return runOpenAICompatible(provider, req);
 }
 
-// Output token limits per Claude model family (Opus 4: 32k, Sonnet 4 / 3.7: 64k, older: 8k).
-function claudeMaxTokens(model) {
-  if (/opus-4/.test(model)) return 32000;
-  if (/sonnet-4|3-7-sonnet/.test(model)) return 64000;
-  return 8192;
-}
-
-const TOOL_NAME = 'record_extraction';
-
-// The Messages API has no JSON-schema output mode, so the schema is given as the input schema of a
-// single tool and the model is forced to call it. The tool input is the structured result. It is not
-// guaranteed to match the schema, so it is checked here and the request is retried once with the errors.
 async function runAnthropic(p, { system, text, pdf, schema, signal }) {
   const client = new Anthropic({
     apiKey: p.apiKey,
@@ -50,73 +41,30 @@ async function runAnthropic(p, { system, text, pdf, schema, signal }) {
   if (pdf) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.base64 }, title: pdf.fileName });
   content.push({ type: 'text', text });
 
-  const tools = [{ name: TOOL_NAME, description: 'Record the extracted values. Call this exactly once with the complete result.', input_schema: schema }];
-  let messages = [{ role: 'user', content }];
-  const usage = { input: 0, output: 0 };
+  const outputConfig = { format: { type: 'json_schema', schema } };
+  if (p.effort) outputConfig.effort = p.effort;
+  const base = { model: p.model, max_tokens: 64000, system, messages: [{ role: 'user', content }], output_config: outputConfig };
 
-  for (let attempt = 1; ; attempt++) {
-    let message;
-    try {
-      // Streaming avoids HTTP timeouts on long documents; finalMessage() collects the full response.
-      message = await client.messages
-        .stream({ model: p.model, max_tokens: claudeMaxTokens(p.model), system, messages, tools, tool_choice: { type: 'tool', name: TOOL_NAME } }, { signal })
-        .finalMessage();
-    } catch (e) {
-      throw friendlyAnthropicError(e);
-    }
-    usage.input += message.usage?.input_tokens || 0;
-    usage.output += message.usage?.output_tokens || 0;
-
-    if (message.stop_reason === 'refusal') throw new Error('The model declined this request.');
-    if (message.stop_reason === 'max_tokens') throw new Error('The response was cut off (max tokens reached). Try a smaller page range or fewer fields.');
-
-    const call = message.content.find((b) => b.type === 'tool_use' && b.name === TOOL_NAME);
-    const errors = call ? validateSchema(call.input, schema) : ['the model did not call the record_extraction tool'];
-    if (!errors.length) return { text: JSON.stringify(call.input), model: message.model, usage };
-    if (attempt >= 2) throw new Error(`The model's output did not match the expected format: ${errors.slice(0, 5).join('; ')}`);
-
-    // Retry once, telling the model what was wrong.
-    messages = [
-      ...messages,
-      { role: 'assistant', content: message.content },
-      {
-        role: 'user',
-        content: [
-          ...(call ? [{ type: 'tool_result', tool_use_id: call.id, is_error: true, content: `Invalid input: ${errors.slice(0, 20).join('; ')}` }] : []),
-          { type: 'text', text: `Call ${TOOL_NAME} again with the complete, corrected result.` },
-        ],
-      },
-    ];
+  const useFallbacks = CLAUDE_FALLBACK_MODELS.includes(p.model);
+  let message;
+  try {
+    // Streaming avoids HTTP timeouts on long documents; finalMessage() collects the full response.
+    message = useFallbacks
+      ? await client.beta.messages.stream({ ...base, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, { signal }).finalMessage()
+      : await client.messages.stream(base, { signal }).finalMessage();
+  } catch (e) {
+    if (useFallbacks && e instanceof Anthropic.BadRequestError && /fallback/i.test(e.message)) {
+      message = await client.messages.stream(base, { signal }).finalMessage();
+    } else throw friendlyAnthropicError(e);
   }
-}
 
-/** Minimal JSON-schema check for the subset buildSchema() uses: type, anyOf, enum, required, additionalProperties, items. */
-export function validateSchema(value, schema, path = '$') {
-  if (schema.anyOf) {
-    return schema.anyOf.some((s) => !validateSchema(value, s, path).length) ? [] : [`${path}: does not match any allowed type`];
+  if (message.stop_reason === 'refusal') {
+    const why = message.stop_details?.explanation || message.stop_details?.category || 'no details';
+    throw new Error(`The model declined this request (${why}).`);
   }
-  const errors = [];
-  if (schema.enum && !schema.enum.includes(value)) errors.push(`${path}: ${JSON.stringify(value)} is not one of the allowed values`);
-  const t = schema.type;
-  const typeOk =
-    !t ||
-    (t === 'null' && value === null) ||
-    (t === 'string' && typeof value === 'string') ||
-    (t === 'boolean' && typeof value === 'boolean') ||
-    (t === 'number' && typeof value === 'number' && Number.isFinite(value)) ||
-    (t === 'integer' && Number.isInteger(value)) ||
-    (t === 'array' && Array.isArray(value)) ||
-    (t === 'object' && value !== null && typeof value === 'object' && !Array.isArray(value));
-  if (!typeOk) return [...errors, `${path}: expected ${t}`];
-  if (t === 'object') {
-    for (const k of schema.required || []) if (!(k in value)) errors.push(`${path}.${k}: missing`);
-    for (const [k, v] of Object.entries(value)) {
-      if (schema.properties?.[k]) errors.push(...validateSchema(v, schema.properties[k], `${path}.${k}`));
-      else if (schema.additionalProperties === false) errors.push(`${path}.${k}: unexpected property`);
-    }
-  }
-  if (t === 'array' && schema.items) value.forEach((v, i) => errors.push(...validateSchema(v, schema.items, `${path}[${i}]`)));
-  return errors;
+  if (message.stop_reason === 'max_tokens') throw new Error('The response was cut off (max tokens reached). Try a smaller page range or fewer fields.');
+  const out = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return { text: out, model: message.model, usage: { input: message.usage?.input_tokens, output: message.usage?.output_tokens } };
 }
 
 function friendlyAnthropicError(e) {
